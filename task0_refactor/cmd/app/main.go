@@ -1,35 +1,19 @@
-// Command app — тонкий main.go, що лише "з'єднує" (wiring) пакунки
-// calculator та textanalyzer. Уся бізнес-логіка живе в internal/.
+// Command app — тонкий main.go, що лише "з'єднує" (wiring) шари застосунку:
+// repository -> service -> handler. Уся логіка живе в internal/.
 package main
 
 import (
-	"errors"
-	"fmt"
 	"os"
 
-	"github.com/softserve/go-with-genai-topic4-error-handling/task0_refactor/internal/calculator"
-	"github.com/softserve/go-with-genai-topic4-error-handling/task0_refactor/internal/textanalyzer"
+	"github.com/softserve/go-with-genai-topic4-error-handling/task0_refactor/internal/handler"
+	"github.com/softserve/go-with-genai-topic4-error-handling/task0_refactor/internal/repository"
+	"github.com/softserve/go-with-genai-topic4-error-handling/task0_refactor/internal/service"
 )
 
 func main() {
-	sum := calculator.Add(2, 3)
-	fmt.Println("2 + 3 =", sum)
+	history := repository.NewInMemoryHistory()
+	app := service.New(history)
+	cli := handler.New(app, os.Stdout, os.Stderr)
 
-	quotient, err := calculator.Divide(10, 0)
-	if err != nil {
-		if errors.Is(err, calculator.ErrDivisionByZero) {
-			fmt.Println("division by zero was correctly detected:", err)
-		} else {
-			fmt.Fprintln(os.Stderr, "unexpected error:", err)
-		}
-	} else {
-		fmt.Println("10 / 0 =", quotient)
-	}
-
-	words, err := textanalyzer.WordCount("the quick brown fox")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "unexpected error:", err)
-		return
-	}
-	fmt.Println("word count:", words)
+	os.Exit(cli.Run(os.Args[1:]))
 }
