@@ -14,28 +14,49 @@ import (
 // коли відмова є тимчасовою і варта повторної спроби.
 var ErrTemporary = errors.New("retry: temporary failure")
 
+// ErrInvalidMaxAttempts — sentinel error для некоректної кількості спроб
+// (maxAttempts < 1).
+var ErrInvalidMaxAttempts = errors.New("retry: maxAttempts must be >= 1")
+
 // Operation — довільна операція, що може повернути помилку.
 type Operation func() (string, error)
 
 // Do виконує op до maxAttempts разів. Між невдалими спробами робить паузу
 // тривалістю backoff. Повторює спробу лише тоді, коли помилка є тимчасовою
-// (errors.Is(err, ErrTemporary)) — для інших помилок Do має одразу
-// повернути обгорнуту помилку без повторних спроб.
+// (errors.Is(err, ErrTemporary)) — для інших помилок Do одразу повертає
+// обгорнуту помилку без повторних спроб.
 //
-// Якщо всі спроби вичерпано, Do повертає чітко обгорнуту фінальну помилку
-// (з інформацією про кількість спроб).
-//
-// TODO(Завдання 2): реалізуйте функцію Do.
-// Вимоги:
-//   - maxAttempts має бути >= 1; якщо операція вдається одразу — повторів немає
-//   - між спробами (окрім останньої) чекайте backoff перед наступною спробою
-//   - якщо помилка НЕ є errors.Is(err, ErrTemporary) — не повторюйте спробу,
-//     одразу поверніть обгорнуту помилку
-//   - якщо всі спроби вичерпано — поверніть обгорнуту фінальну помилку,
-//     яка через errors.Is все ще розпізнається як ErrTemporary
+// Поведінка:
+//   - maxAttempts має бути >= 1, інакше повертається помилка, що обгортає
+//     ErrInvalidMaxAttempts
+//   - якщо операція вдається одразу — повторів немає
+//   - між спробами (окрім останньої) Do чекає backoff
+//   - якщо помилка НЕ є errors.Is(err, ErrTemporary) — повторів немає,
+//     одразу повертається обгорнута помилка
+//   - якщо всі спроби вичерпано — повертається обгорнута фінальна помилка
+//     (з кількістю спроб), яка через errors.Is все ще розпізнається як
+//     ErrTemporary
 func Do(op Operation, maxAttempts int, backoff time.Duration) (string, error) {
-	// TODO: реалізуйте
-	panic("not implemented")
+	if maxAttempts < 1 {
+		return "", fmt.Errorf("%w: got %d", ErrInvalidMaxAttempts, maxAttempts)
+	}
+
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		result, err := op()
+		if err == nil {
+			return result, nil
+		}
+		if !errors.Is(err, ErrTemporary) {
+			return "", fmt.Errorf("retry: attempt %d/%d failed with a non-temporary error: %w", attempt, maxAttempts, err)
+		}
+		lastErr = err
+		if attempt < maxAttempts {
+			time.Sleep(backoff)
+		}
+	}
+
+	return "", fmt.Errorf("retry: all %d attempts failed: %w", maxAttempts, lastErr)
 }
 
 // NewFlakyOperation — допоміжна функція для тестів/демонстрації: повертає
