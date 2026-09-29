@@ -44,6 +44,11 @@ type CLI struct {
 	app    *service.App
 	out    io.Writer
 	errOut io.Writer
+
+	// writeErr — перша помилка запису в out або errOut під час поточного
+	// Run. Запис не перериває обробку команди; помилка перевіряється один
+	// раз наприкінці Run (патерн "errors are values").
+	writeErr error
 }
 
 // New створює CLI, що делегує роботу app і пише результати в out,
@@ -53,7 +58,26 @@ func New(app *service.App, out, errOut io.Writer) *CLI {
 }
 
 // Run виконує команду з args (без імені програми) і повертає код завершення.
+// Якщо результат не вдалося записати (наприклад, stdout закрито або канал
+// розірвано), Run повертає ExitError навіть для успішно виконаної команди:
+// користувач результату не побачив, тож рапортувати успіх не можна.
 func (c *CLI) Run(args []string) int {
+	c.writeErr = nil
+	code := c.dispatch(args)
+	if c.writeErr == nil {
+		return code
+	}
+
+	// Best effort: якщо не працює саме errOut, це повідомлення теж буде
+	// втрачено, але код завершення все одно сигналізує про збій.
+	c.write(c.errOut, "error: writing output: %v\n", c.writeErr)
+	if code == ExitOK {
+		return ExitError
+	}
+	return code
+}
+
+func (c *CLI) dispatch(args []string) int {
 	if len(args) == 0 {
 		return c.demo()
 	}
@@ -67,23 +91,23 @@ func (c *CLI) Run(args []string) int {
 	case "demo":
 		return c.demo()
 	case "help", "-h", "--help":
-		fmt.Fprint(c.out, usage)
+		c.write(c.out, "%s", usage)
 		return ExitOK
 	default:
-		fmt.Fprintf(c.errOut, "unknown command %q\n\n%s", cmd, usage)
+		c.write(c.errOut, "unknown command %q\n\n%s", cmd, usage)
 		return ExitUsage
 	}
 }
 
 func (c *CLI) calculate(cmd string, args []string) int {
 	if len(args) != 2 {
-		fmt.Fprintf(c.errOut, "%s expects exactly two numbers\n\n%s", cmd, usage)
+		c.write(c.errOut, "%s expects exactly two numbers\n\n%s", cmd, usage)
 		return ExitUsage
 	}
 	a, errA := strconv.ParseFloat(args[0], 64)
 	b, errB := strconv.ParseFloat(args[1], 64)
 	if err := errors.Join(errA, errB); err != nil {
-		fmt.Fprintf(c.errOut, "%s: invalid number: %v\n", cmd, err)
+		c.write(c.errOut, "%s: invalid number: %v\n", cmd, err)
 		return ExitUsage
 	}
 
@@ -91,7 +115,7 @@ func (c *CLI) calculate(cmd string, args []string) int {
 	if err != nil {
 		return c.fail(err)
 	}
-	fmt.Fprintln(c.out, calc)
+	c.write(c.out, "%v\n", calc)
 	return ExitOK
 }
 
@@ -100,7 +124,7 @@ func (c *CLI) analyze(args []string) int {
 	if err != nil {
 		return c.fail(err)
 	}
-	fmt.Fprintf(c.out, "words: %d, chars: %d\n", stats.Words, stats.Chars)
+	c.write(c.out, "words: %d, chars: %d\n", stats.Words, stats.Chars)
 	return ExitOK
 }
 
@@ -112,28 +136,28 @@ func (c *CLI) demo() int {
 	if err != nil {
 		return c.fail(err)
 	}
-	fmt.Fprintln(c.out, "2 + 3 =", sum.Result)
+	c.write(c.out, "2 + 3 = %v\n", sum.Result)
 
 	if _, err := c.app.Calculate(models.OpDivide, 10, 0); err != nil {
 		if !errors.Is(err, service.ErrDivisionByZero) {
 			return c.fail(err)
 		}
-		fmt.Fprintln(c.out, "division by zero was correctly detected:", err)
+		c.write(c.out, "division by zero was correctly detected: %v\n", err)
 	}
 
 	stats, err := c.app.AnalyzeText("the quick brown fox")
 	if err != nil {
 		return c.fail(err)
 	}
-	fmt.Fprintln(c.out, "word count:", stats.Words)
+	c.write(c.out, "word count: %d\n", stats.Words)
 
 	entries, err := c.app.History()
 	if err != nil {
 		return c.fail(err)
 	}
-	fmt.Fprintln(c.out, "history:")
+	c.write(c.out, "history:\n")
 	for i, e := range entries {
-		fmt.Fprintf(c.out, "  %d. [%s] %s\n", i+1, e.Kind, e.Summary)
+		c.write(c.out, "  %d. [%s] %s\n", i+1, e.Kind, e.Summary)
 	}
 	return ExitOK
 }
@@ -144,11 +168,23 @@ func (c *CLI) demo() int {
 func (c *CLI) fail(err error) int {
 	switch {
 	case errors.Is(err, service.ErrDivisionByZero):
-		fmt.Fprintln(c.errOut, "error: cannot divide by zero")
+		c.write(c.errOut, "error: cannot divide by zero\n")
+	case errors.Is(err, service.ErrNonFiniteInput):
+		c.write(c.errOut, "error: operands must be finite numbers (NaN and Inf are not allowed)\n")
+	case errors.Is(err, service.ErrNonFiniteResult):
+		c.write(c.errOut, "error: result is not a finite number (overflow)\n")
 	case errors.Is(err, service.ErrEmptyText):
-		fmt.Fprintln(c.errOut, "error: text must not be empty")
+		c.write(c.errOut, "error: text must not be empty\n")
 	default:
-		fmt.Fprintln(c.errOut, "error:", err)
+		c.write(c.errOut, "error: %v\n", err)
 	}
 	return ExitError
+}
+
+// write форматує та записує повідомлення у w, запам'ятовуючи першу помилку
+// запису для перевірки наприкінці Run.
+func (c *CLI) write(w io.Writer, format string, args ...any) {
+	if _, err := fmt.Fprintf(w, format, args...); err != nil && c.writeErr == nil {
+		c.writeErr = err
+	}
 }

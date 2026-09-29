@@ -18,6 +18,10 @@ var ErrTemporary = errors.New("retry: temporary failure")
 // (maxAttempts < 1).
 var ErrInvalidMaxAttempts = errors.New("retry: maxAttempts must be >= 1")
 
+// ErrNilOperation — sentinel error для випадку, коли в Do передано nil
+// замість операції.
+var ErrNilOperation = errors.New("retry: nil operation")
+
 // Operation — довільна операція, що може повернути помилку.
 type Operation func() (string, error)
 
@@ -27,21 +31,25 @@ type Operation func() (string, error)
 // обгорнуту помилку без повторних спроб.
 //
 // Поведінка:
+//   - op не може бути nil, інакше повертається ErrNilOperation
 //   - maxAttempts має бути >= 1, інакше повертається помилка, що обгортає
 //     ErrInvalidMaxAttempts
 //   - якщо операція вдається одразу — повторів немає
 //   - між спробами (окрім останньої) Do чекає backoff
 //   - якщо помилка НЕ є errors.Is(err, ErrTemporary) — повторів немає,
 //     одразу повертається обгорнута помилка
-//   - якщо всі спроби вичерпано — повертається обгорнута фінальна помилка
-//     (з кількістю спроб), яка через errors.Is все ще розпізнається як
-//     ErrTemporary
+//   - якщо всі спроби вичерпано — повертається фінальна помилка, що через
+//     errors.Join зберігає помилки ВСІХ спроб (з їх номерами) і через
+//     errors.Is все ще розпізнається як ErrTemporary
 func Do(op Operation, maxAttempts int, backoff time.Duration) (string, error) {
+	if op == nil {
+		return "", ErrNilOperation
+	}
 	if maxAttempts < 1 {
 		return "", fmt.Errorf("%w: got %d", ErrInvalidMaxAttempts, maxAttempts)
 	}
 
-	var lastErr error
+	var attemptErrs []error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		result, err := op()
 		if err == nil {
@@ -50,13 +58,16 @@ func Do(op Operation, maxAttempts int, backoff time.Duration) (string, error) {
 		if !errors.Is(err, ErrTemporary) {
 			return "", fmt.Errorf("retry: attempt %d/%d failed with a non-temporary error: %w", attempt, maxAttempts, err)
 		}
-		lastErr = err
+		attemptErrs = append(attemptErrs, fmt.Errorf("attempt %d/%d: %w", attempt, maxAttempts, err))
 		if attempt < maxAttempts {
 			time.Sleep(backoff)
 		}
 	}
 
-	return "", fmt.Errorf("retry: all %d attempts failed: %w", maxAttempts, lastErr)
+	// errors.Join зберігає контекст кожної невдалої спроби замість лише
+	// останньої; оскільки кожна з них обгортає ErrTemporary, фінальна помилка
+	// теж розпізнається через errors.Is(err, ErrTemporary).
+	return "", fmt.Errorf("retry: all %d attempts failed: %w", maxAttempts, errors.Join(attemptErrs...))
 }
 
 // NewFlakyOperation — допоміжна функція для тестів/демонстрації: повертає
